@@ -33,4 +33,12 @@ Study With Me is a cross-platform focus product for web and React Native. It is 
 - Treat realtime presence as ephemeral channel state, not a permanent table
 
 ## Next Recommended Step
-Scaffold the monorepo and shared packages first, then implement the timer and dashboard shells before wiring live data.
+Wire live Supabase data into the existing web/mobile shells next, then complete realtime presence, native Google OAuth, and notification deep-link verification.
+
+## Current Implementation Status
+- Root docs and pnpm workspace are in place
+- Shared domain, design tokens, and Supabase helper packages are implemented
+- Web has `/dashboard` and `/sign-in` routes with dashboard state persistence and browser notifications
+- Mobile has local-mode auth shell, timer/task persistence, Expo local notifications, and settings scaffolding
+- Supabase schema scaffolding exists at `supabase/schema.sql`
+- Remaining v1 gaps are realtime presence subscriptions, full native Google auth flow, and notification tap/deep-link verification

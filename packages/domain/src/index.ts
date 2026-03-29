@@ -65,6 +65,14 @@ export type TimerRuntimeState = {
   secondsRemaining: number;
   previousPhase?: "focus" | "break";
   completedFocusMinutes: number;
+  startedAt?: string;
+  taskId?: string;
+};
+
+export type SubjectSummary = {
+  subject: string;
+  sessions: number;
+  totalMinutes: number;
 };
 
 export const timerPresets: TimerPreset[] = [
@@ -108,9 +116,27 @@ export const createMockDashboardSnapshot = (): DashboardSnapshot => ({
     },
   ],
   rooms: [
-    { id: "room-1", name: "Silent Library", vibe: "Rain, soft keys, deep work", occupancy: 46, syncedPresetId: "deep" },
-    { id: "room-2", name: "Exam Sprint", vibe: "Fast cycles, high energy", occupancy: 29, syncedPresetId: "classic" },
-    { id: "room-3", name: "Night Owl", vibe: "Late-night calm and lo-fi", occupancy: 18, syncedPresetId: "reset" },
+    {
+      id: "room-1",
+      name: "Silent Library",
+      vibe: "Rain, soft keys, deep work",
+      occupancy: 46,
+      syncedPresetId: "deep",
+    },
+    {
+      id: "room-2",
+      name: "Exam Sprint",
+      vibe: "Fast cycles, high energy",
+      occupancy: 29,
+      syncedPresetId: "classic",
+    },
+    {
+      id: "room-3",
+      name: "Night Owl",
+      vibe: "Late-night calm and lo-fi",
+      occupancy: 18,
+      syncedPresetId: "reset",
+    },
   ],
   presence: [
     { id: "user-1", name: "Maya", avatar: "MA", status: "studying" },
@@ -139,11 +165,33 @@ export const createMockDashboardSnapshot = (): DashboardSnapshot => ({
       breakMinutes: 5,
       status: "completed",
     },
+    {
+      id: "session-3",
+      taskId: "task-1",
+      subject: "Systems",
+      startedAt: "2026-03-28T12:10:00.000Z",
+      completedAt: "2026-03-28T12:35:00.000Z",
+      focusMinutes: 25,
+      breakMinutes: 5,
+      status: "completed",
+    },
+    {
+      id: "session-4",
+      taskId: "task-3",
+      subject: "Networks",
+      startedAt: "2026-03-27T19:40:00.000Z",
+      completedAt: "2026-03-27T20:05:00.000Z",
+      focusMinutes: 25,
+      breakMinutes: 5,
+      status: "completed",
+    },
   ],
 });
 
 export const getWeeklyAverage = (minutes: number[]) =>
-  Math.round(minutes.reduce((total, value) => total + value, 0) / minutes.length);
+  Math.round(minutes.reduce((total, value) => total + value, 0) / Math.max(minutes.length, 1));
+
+export const getWeeklyPeak = (minutes: number[]) => Math.max(...minutes, 1);
 
 export const getProgressRatio = (task: StudyTask) =>
   Math.min(task.completedPomodoros / Math.max(task.estimatedPomodoros, 1), 1);
@@ -161,6 +209,12 @@ export const formatFocusMinutes = (minutes: number) => {
 
 export const formatTimerLabel = (minutes: number) => `${minutes.toString().padStart(2, "0")}:00`;
 
+export const formatSecondsClock = (seconds: number) => {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes.toString().padStart(2, "0")}:${remainder.toString().padStart(2, "0")}`;
+};
+
 export const createTimerRuntime = (preset: TimerPreset): TimerRuntimeState => ({
   phase: "idle",
   activeSegment: "focus",
@@ -169,10 +223,15 @@ export const createTimerRuntime = (preset: TimerPreset): TimerRuntimeState => ({
   completedFocusMinutes: 0,
 });
 
-export const updateTimerPreset = (
-  state: TimerRuntimeState,
-  preset: TimerPreset,
-): TimerRuntimeState => createTimerRuntime(preset);
+export const updateTimerPreset = (state: TimerRuntimeState, preset: TimerPreset): TimerRuntimeState => ({
+  ...createTimerRuntime(preset),
+  taskId: state.taskId,
+});
+
+export const assignTaskToTimer = (state: TimerRuntimeState, taskId?: string): TimerRuntimeState => ({
+  ...state,
+  taskId,
+});
 
 export const pauseTimer = (state: TimerRuntimeState): TimerRuntimeState => {
   if (state.phase === "completed" || state.phase === "paused" || state.phase === "idle") {
@@ -191,6 +250,7 @@ export const resumeTimer = (state: TimerRuntimeState): TimerRuntimeState => {
     return {
       ...state,
       phase: "focus",
+      startedAt: state.startedAt ?? new Date().toISOString(),
     };
   }
 
@@ -235,14 +295,173 @@ export const tickTimer = (state: TimerRuntimeState): TimerRuntimeState => {
   };
 };
 
-export const resetTimer = (preset: TimerPreset): TimerRuntimeState => createTimerRuntime(preset);
+export const resetTimer = (preset: TimerPreset, taskId?: string): TimerRuntimeState => ({
+  ...createTimerRuntime(preset),
+  taskId,
+});
 
-export const formatSecondsClock = (seconds: number) => {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes.toString().padStart(2, "0")}:${remainder
-    .toString()
-    .padStart(2, "0")}`;
+export const serializeTimerRuntime = (state: TimerRuntimeState) => JSON.stringify(state);
+
+export const parseTimerRuntime = (
+  value: string | null | undefined,
+  presets: TimerPreset[] = timerPresets,
+): TimerRuntimeState | null => {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const raw = JSON.parse(value) as Partial<TimerRuntimeState> & { preset?: Partial<TimerPreset> };
+    const preset = presets.find((item) => item.id === raw.preset?.id);
+
+    if (!preset || typeof raw.secondsRemaining !== "number" || !raw.phase || !raw.activeSegment) {
+      return null;
+    }
+
+    return {
+      phase: raw.phase,
+      activeSegment: raw.activeSegment,
+      preset,
+      secondsRemaining: raw.secondsRemaining,
+      previousPhase: raw.previousPhase,
+      completedFocusMinutes: raw.completedFocusMinutes ?? 0,
+      startedAt: raw.startedAt,
+      taskId: raw.taskId,
+    };
+  } catch {
+    return null;
+  }
 };
 
-export const getWeeklyPeak = (minutes: number[]) => Math.max(...minutes, 1);
+export const createCompletedSession = (
+  state: TimerRuntimeState,
+  tasks: StudyTask[],
+): FocusSession | null => {
+  if (state.phase !== "completed") {
+    return null;
+  }
+
+  const linkedTask = tasks.find((task) => task.id === state.taskId);
+
+  return {
+    id: `session-${Date.now()}`,
+    taskId: state.taskId,
+    subject: linkedTask?.subject ?? "General",
+    startedAt: state.startedAt ?? new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    focusMinutes: state.preset.focusMinutes,
+    breakMinutes: state.preset.breakMinutes,
+    status: "completed",
+  };
+};
+
+export const applyCompletedSessionToTasks = (tasks: StudyTask[], session: FocusSession) =>
+  tasks.map((task) =>
+    task.id === session.taskId
+      ? {
+          ...task,
+          completedPomodoros: Math.min(task.completedPomodoros + 1, task.estimatedPomodoros),
+        }
+      : task,
+  );
+
+export const getSubjectSummary = (sessions: FocusSession[]): SubjectSummary[] => {
+  const map = new Map<string, SubjectSummary>();
+
+  sessions.forEach((session) => {
+    const current = map.get(session.subject) ?? {
+      subject: session.subject,
+      sessions: 0,
+      totalMinutes: 0,
+    };
+
+    current.sessions += 1;
+    current.totalMinutes += session.focusMinutes;
+    map.set(session.subject, current);
+  });
+
+  return [...map.values()].sort((left, right) => right.totalMinutes - left.totalMinutes);
+};
+
+const formatterForTimezone = (timezone: string) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+export const getSessionDayKey = (isoDate: string, timezone: string) =>
+  formatterForTimezone(timezone).format(new Date(isoDate));
+
+export const calculateStreaks = (sessions: FocusSession[], timezone: string) => {
+  const uniqueDays = [...new Set(sessions.map((session) => getSessionDayKey(session.startedAt, timezone)))]
+    .sort()
+    .reverse();
+
+  let currentStreak = 0;
+  let longestStreak = 0;
+  let previousDay: Date | null = null;
+  const todayKey = getSessionDayKey(new Date().toISOString(), timezone);
+
+  uniqueDays.forEach((dayKey, index) => {
+    const currentDay = new Date(`${dayKey}T00:00:00`);
+
+    if (index === 0) {
+      longestStreak = 1;
+      if (dayKey === todayKey) {
+        currentStreak = 1;
+      }
+      previousDay = currentDay;
+      return;
+    }
+
+    if (!previousDay) {
+      return;
+    }
+
+    const difference = Math.round((previousDay.getTime() - currentDay.getTime()) / 86_400_000);
+
+    if (difference === 1) {
+      longestStreak += 1;
+      if (currentStreak === index) {
+        currentStreak += 1;
+      }
+    } else {
+      longestStreak = Math.max(longestStreak, 1);
+      if (currentStreak !== 0 && currentStreak !== index) {
+        currentStreak = Math.max(currentStreak, 1);
+      }
+    }
+
+    previousDay = currentDay;
+  });
+
+  return {
+    currentStreak,
+    longestStreak: Math.max(longestStreak, currentStreak, uniqueDays.length > 0 ? 1 : 0),
+  };
+};
+
+export const calculateTodayFocusMinutes = (sessions: FocusSession[], timezone: string) => {
+  const todayKey = getSessionDayKey(new Date().toISOString(), timezone);
+
+  return sessions
+    .filter((session) => getSessionDayKey(session.startedAt, timezone) === todayKey)
+    .reduce((total, session) => total + session.focusMinutes, 0);
+};
+
+export const calculateWeeklyFocusMinutes = (sessions: FocusSession[], timezone: string) => {
+  const now = new Date();
+  const labels = Array.from({ length: 7 }).map((_, index) => {
+    const day = new Date(now);
+    day.setDate(now.getDate() - (6 - index));
+    return getSessionDayKey(day.toISOString(), timezone);
+  });
+
+  return labels.map((dayKey) =>
+    sessions
+      .filter((session) => getSessionDayKey(session.startedAt, timezone) === dayKey)
+      .reduce((total, session) => total + session.focusMinutes, 0),
+  );
+};

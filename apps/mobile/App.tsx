@@ -1,33 +1,62 @@
-import { startTransition, useEffect, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { startTransition, useEffect, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
+import * as Device from "expo-device";
+import * as Notifications from "expo-notifications";
 import {
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { appCopy, studyPalette } from "@studywithme/design-tokens";
 import {
+  applyCompletedSessionToTasks,
+  assignTaskToTimer,
+  calculateStreaks,
+  calculateTodayFocusMinutes,
+  calculateWeeklyFocusMinutes,
+  createCompletedSession,
   createMockDashboardSnapshot,
   createTimerRuntime,
   formatFocusMinutes,
   formatSecondsClock,
   getProgressRatio,
+  getSubjectSummary,
+  parseTimerRuntime,
   pauseTimer,
   resetTimer,
   resumeTimer,
+  serializeTimerRuntime,
   tickTimer,
   timerPresets,
   updateTimerPreset,
   weekLabels,
 } from "@studywithme/domain";
-import { getSupabaseStatusMessage, readSupabaseConfig } from "@studywithme/supabase";
+import {
+  createStudyWithMeNativeClient,
+  getSupabaseStatusMessage,
+  readSupabaseConfig,
+} from "@studywithme/supabase";
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 const snapshot = createMockDashboardSnapshot();
-
-const tabs = ["Dashboard", "Rooms", "Tasks"] as const;
+const tabs = ["Dashboard", "Rooms", "Tasks", "Settings"] as const;
+const timerStorageKey = "study-with-me:mobile:timer";
+const sessionsStorageKey = "study-with-me:mobile:sessions";
+const tasksStorageKey = "study-with-me:mobile:tasks";
 
 type Tab = (typeof tabs)[number];
 
@@ -36,9 +65,36 @@ const supabaseState = readSupabaseConfig({
   anonKey: process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
 });
 
+const supabase = createStudyWithMeNativeClient(supabaseState, AsyncStorage);
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("Dashboard");
+  const [appScreen, setAppScreen] = useState<"auth" | "app">(supabaseState.configured ? "auth" : "app");
+  const [email, setEmail] = useState("");
+  const [authStatus, setAuthStatus] = useState("Send a magic link when Supabase is configured, or continue in local mode.");
+  const [notificationStatus, setNotificationStatus] = useState("Notifications are available for focus and break events.");
+  const [tasks, setTasks] = useState(snapshot.tasks);
+  const [recentSessions, setRecentSessions] = useState(snapshot.recentSessions);
   const [timerState, setTimerState] = useState(() => createTimerRuntime(snapshot.activePreset));
+  const previousPhase = useRef(timerState.phase);
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+  useEffect(() => {
+    void hydrateState();
+    void requestNotificationPermission();
+  }, []);
+
+  useEffect(() => {
+    void AsyncStorage.setItem(timerStorageKey, serializeTimerRuntime(timerState));
+  }, [timerState]);
+
+  useEffect(() => {
+    void AsyncStorage.setItem(sessionsStorageKey, JSON.stringify(recentSessions));
+  }, [recentSessions]);
+
+  useEffect(() => {
+    void AsyncStorage.setItem(tasksStorageKey, JSON.stringify(tasks));
+  }, [tasks]);
 
   useEffect(() => {
     if (!["focus", "break"].includes(timerState.phase)) {
@@ -52,6 +108,125 @@ export default function App() {
     return () => clearInterval(interval);
   }, [timerState.phase]);
 
+  useEffect(() => {
+    const phaseChanged = previousPhase.current !== timerState.phase;
+
+    if (!phaseChanged) {
+      return;
+    }
+
+    if (timerState.phase === "break") {
+      void sendLocalNotification("Focus block complete", "Time for a short break.");
+    }
+
+    if (timerState.phase === "completed") {
+      const session = createCompletedSession(timerState, tasks);
+
+      if (session) {
+        setRecentSessions((current) => [session, ...current].slice(0, 14));
+        setTasks((current) => applyCompletedSessionToTasks(current, session));
+      }
+
+      void sendLocalNotification("Session finished", "Your focus and break cycle are complete.");
+    }
+
+    previousPhase.current = timerState.phase;
+  }, [tasks, timerState]);
+
+  const streaks = calculateStreaks(recentSessions, timezone);
+  const weeklyFocusMinutes = calculateWeeklyFocusMinutes(recentSessions, timezone);
+  const subjectSummary = getSubjectSummary(recentSessions).slice(0, 3);
+  const todayFocusMinutes = calculateTodayFocusMinutes(recentSessions, timezone);
+  const selectedTask = tasks.find((task) => task.id === timerState.taskId);
+
+  async function hydrateState() {
+    const [savedTimer, savedSessions, savedTasks] = await Promise.all([
+      AsyncStorage.getItem(timerStorageKey),
+      AsyncStorage.getItem(sessionsStorageKey),
+      AsyncStorage.getItem(tasksStorageKey),
+    ]);
+
+    const parsedTimer = parseTimerRuntime(savedTimer);
+
+    if (parsedTimer) {
+      setTimerState(parsedTimer);
+    }
+
+    if (savedSessions) {
+      setRecentSessions(JSON.parse(savedSessions));
+    }
+
+    if (savedTasks) {
+      setTasks(JSON.parse(savedTasks));
+    }
+  }
+
+  async function requestNotificationPermission() {
+    const permission = await Notifications.requestPermissionsAsync();
+
+    setNotificationStatus(
+      permission.status === "granted"
+        ? "Local notifications are enabled for timer milestones."
+        : "Notifications are disabled. Timer events will stay in-app only.",
+    );
+  }
+
+  async function sendMagicLink() {
+    if (!supabase) {
+      setAuthStatus("Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to enable auth.");
+      return;
+    }
+
+    if (!email) {
+      setAuthStatus("Enter an email address first.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithOtp({ email });
+    setAuthStatus(error ? error.message : "Magic link requested. Finish sign-in from your email, then return here.");
+  }
+
+  if (appScreen === "auth") {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="dark" />
+        <View style={styles.authShell}>
+          <Text style={styles.heroEyebrow}>Mobile auth</Text>
+          <Text style={styles.heroTitle}>{appCopy.name}</Text>
+          <Text style={styles.heroCopy}>
+            Mobile keeps full parity for the core study flow. Sign in when Supabase is ready, or continue locally for now.
+          </Text>
+
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            placeholder="you@example.com"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            style={styles.input}
+            placeholderTextColor="#8a7a6c"
+          />
+
+          <Pressable style={styles.primaryButton} onPress={sendMagicLink}>
+            <Text style={styles.primaryButtonLabel}>Send magic link</Text>
+          </Pressable>
+
+          <View style={styles.panel}>
+            <Text style={styles.sectionEyebrow}>Status</Text>
+            <Text style={styles.helperCopy}>{authStatus}</Text>
+            <Text style={[styles.helperCopy, { marginTop: 8 }]}>
+              Google OAuth is queued behind native redirect-scheme wiring.
+            </Text>
+          </View>
+
+          <Pressable style={styles.secondaryButton} onPress={() => setAppScreen("app")}>
+            <Text style={styles.secondaryButtonLabel}>Continue in local mode</Text>
+          </Pressable>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
@@ -64,6 +239,7 @@ export default function App() {
             <Text style={styles.liveBadgeText}>{snapshot.liveUsers} studying live</Text>
           </View>
           <Text style={styles.statusText}>{getSupabaseStatusMessage(supabaseState.configured)}</Text>
+          <Text style={styles.statusText}>{notificationStatus}</Text>
         </View>
 
         <View style={styles.tabRow}>
@@ -86,9 +262,12 @@ export default function App() {
           <>
             <View style={styles.timerCard}>
               <View style={styles.rowBetween}>
-                <View>
+                <View style={{ flex: 1 }}>
                   <Text style={styles.sectionEyebrow}>Current cycle</Text>
                   <Text style={styles.timerPreset}>{timerState.preset.label}</Text>
+                  <Text style={styles.timerMetaLabel}>
+                    {selectedTask ? `Linked task: ${selectedTask.title}` : "No task linked yet"}
+                  </Text>
                 </View>
                 <View style={styles.phaseBadge}>
                   <Text style={styles.phaseBadgeText}>{timerState.phase}</Text>
@@ -96,7 +275,7 @@ export default function App() {
               </View>
               <Text style={styles.timerValue}>{formatSecondsClock(timerState.secondsRemaining)}</Text>
               <Text style={styles.timerMeta}>
-                Focus today {formatFocusMinutes(snapshot.todayFocusMinutes + timerState.completedFocusMinutes)}
+                Focus today {formatFocusMinutes(todayFocusMinutes)}
               </Text>
               <View style={styles.buttonRow}>
                 <Pressable style={styles.primaryButton} onPress={() => setTimerState((current) => resumeTimer(current))}>
@@ -108,11 +287,14 @@ export default function App() {
                         : "Keep flowing"}
                   </Text>
                 </Pressable>
-                <Pressable style={styles.secondaryButton} onPress={() => setTimerState((current) => pauseTimer(current))}>
-                  <Text style={styles.secondaryButtonLabel}>Pause</Text>
+                <Pressable style={styles.secondaryButtonDark} onPress={() => setTimerState((current) => pauseTimer(current))}>
+                  <Text style={styles.secondaryButtonDarkLabel}>Pause</Text>
                 </Pressable>
-                <Pressable style={styles.secondaryButton} onPress={() => setTimerState(resetTimer(timerState.preset))}>
-                  <Text style={styles.secondaryButtonLabel}>Reset</Text>
+                <Pressable
+                  style={styles.secondaryButtonDark}
+                  onPress={() => setTimerState((current) => resetTimer(current.preset, current.taskId))}
+                >
+                  <Text style={styles.secondaryButtonDarkLabel}>Reset</Text>
                 </Pressable>
               </View>
               <View style={styles.presetWrap}>
@@ -136,24 +318,52 @@ export default function App() {
                   );
                 })}
               </View>
+              <View style={styles.presetWrap}>
+                {tasks.map((task) => {
+                  const active = timerState.taskId === task.id;
+
+                  return (
+                    <Pressable
+                      key={task.id}
+                      style={[styles.presetChip, active && styles.taskChipActive]}
+                      onPress={() =>
+                        setTimerState((current) =>
+                          assignTaskToTimer(current, active ? undefined : task.id),
+                        )
+                      }
+                    >
+                      <Text style={[styles.presetChipLabel, active && styles.taskChipLabelActive]}>
+                        {task.subject}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             </View>
 
             <View style={styles.statGrid}>
-              <MetricCard label="Current streak" value={`${snapshot.currentStreak} days`} detail="Consistency is rising" />
-              <MetricCard label="Longest streak" value={`${snapshot.longestStreak} days`} detail="Best personal run" />
+              <MetricCard label="Current streak" value={`${streaks.currentStreak} days`} detail="Synced from saved sessions" />
+              <MetricCard label="Longest streak" value={`${streaks.longestStreak} days`} detail="Timezone-aware streak rules" />
             </View>
 
             <View style={styles.panel}>
               <Text style={styles.sectionEyebrow}>Weekly trend</Text>
               <Text style={styles.sectionTitle}>Focus rhythm</Text>
               <View style={styles.chartRow}>
-                {snapshot.weeklyFocusMinutes.map((minutes, index) => (
+                {weeklyFocusMinutes.map((minutes, index) => (
                   <View key={weekLabels[index]} style={styles.chartColumn}>
                     <Text style={styles.chartValue}>{minutes}</Text>
                     <View style={styles.chartTrack}>
                       <View style={[styles.chartBar, { height: Math.max(minutes * 0.8, 18) }]} />
                     </View>
                     <Text style={styles.chartLabel}>{weekLabels[index]}</Text>
+                  </View>
+                ))}
+              </View>
+              <View style={styles.summaryWrap}>
+                {subjectSummary.map((subject) => (
+                  <View key={subject.subject} style={styles.summaryChip}>
+                    <Text style={styles.summaryChipText}>{subject.subject} {subject.totalMinutes}m</Text>
                   </View>
                 ))}
               </View>
@@ -166,7 +376,17 @@ export default function App() {
             <Text style={styles.sectionEyebrow}>Ambient rooms</Text>
             <Text style={styles.sectionTitle}>Quiet spaces with synced timers</Text>
             {snapshot.rooms.map((room) => (
-              <View key={room.id} style={styles.roomCard}>
+              <Pressable
+                key={room.id}
+                style={styles.roomCard}
+                onPress={() => {
+                  const preset = timerPresets.find((candidate) => candidate.id === room.syncedPresetId);
+
+                  if (preset) {
+                    setTimerState((current) => updateTimerPreset(current, preset));
+                  }
+                }}
+              >
                 <View style={styles.rowBetween}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.roomTitle}>{room.name}</Text>
@@ -174,7 +394,7 @@ export default function App() {
                   </View>
                   <Text style={styles.roomCount}>{room.occupancy}</Text>
                 </View>
-              </View>
+              </Pressable>
             ))}
             <Text style={styles.helperCopy}>v1 keeps rooms calm: presence, occupancy, synced timer, no chat.</Text>
           </View>
@@ -184,7 +404,7 @@ export default function App() {
           <View style={styles.panel}>
             <Text style={styles.sectionEyebrow}>Task-linked sessions</Text>
             <Text style={styles.sectionTitle}>Study goals for today</Text>
-            {snapshot.tasks.map((task) => (
+            {tasks.map((task) => (
               <View key={task.id} style={styles.taskCard}>
                 <View style={styles.rowBetween}>
                   <View style={{ flex: 1 }}>
@@ -200,6 +420,23 @@ export default function App() {
                 </View>
               </View>
             ))}
+          </View>
+        ) : null}
+
+        {activeTab === "Settings" ? (
+          <View style={styles.panel}>
+            <Text style={styles.sectionEyebrow}>Settings and auth</Text>
+            <Text style={styles.sectionTitle}>Project wiring</Text>
+            <Text style={styles.helperCopy}>{notificationStatus}</Text>
+            <Text style={[styles.helperCopy, { marginTop: 8 }]}>
+              {getSupabaseStatusMessage(supabaseState.configured)}
+            </Text>
+            <Text style={[styles.helperCopy, { marginTop: 8 }]}>
+              Expo mobile auth currently supports the magic-link flow scaffolding; Google OAuth still needs redirect-scheme setup.
+            </Text>
+            <Pressable style={[styles.secondaryButton, { marginTop: 14 }]} onPress={() => setAppScreen("auth")}>
+              <Text style={styles.secondaryButtonLabel}>Open auth screen</Text>
+            </Pressable>
           </View>
         ) : null}
 
@@ -223,6 +460,20 @@ export default function App() {
       </ScrollView>
     </SafeAreaView>
   );
+
+  async function sendLocalNotification(title: string, body: string) {
+    if (!Device.isDevice) {
+      return;
+    }
+
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        body,
+      },
+      trigger: null,
+    });
+  }
 }
 
 function MetricCard({
@@ -251,6 +502,12 @@ const styles = StyleSheet.create({
   content: {
     padding: 18,
     gap: 16,
+  },
+  authShell: {
+    flex: 1,
+    padding: 18,
+    gap: 14,
+    justifyContent: "center",
   },
   hero: {
     backgroundColor: studyPalette.paper,
@@ -298,16 +555,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
+  input: {
+    borderRadius: 20,
+    backgroundColor: studyPalette.paper,
+    borderWidth: 1,
+    borderColor: studyPalette.border,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    color: studyPalette.ink,
+  },
   tabRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
   tabButton: {
-    flex: 1,
+    flexGrow: 1,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: studyPalette.border,
     paddingVertical: 12,
+    paddingHorizontal: 10,
     backgroundColor: "rgba(255,250,242,0.7)",
   },
   tabButtonActive: {
@@ -345,6 +613,11 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 24,
     fontWeight: "700",
+  },
+  timerMetaLabel: {
+    marginTop: 6,
+    color: "rgba(255,255,255,0.55)",
+    lineHeight: 18,
   },
   phaseBadge: {
     backgroundColor: "rgba(255,255,255,0.08)",
@@ -386,11 +659,23 @@ const styles = StyleSheet.create({
   secondaryButton: {
     borderRadius: 999,
     borderWidth: 1,
+    borderColor: studyPalette.border,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    backgroundColor: studyPalette.paper,
+  },
+  secondaryButtonLabel: {
+    color: studyPalette.ink,
+    fontWeight: "600",
+  },
+  secondaryButtonDark: {
+    borderRadius: 999,
+    borderWidth: 1,
     borderColor: "rgba(255,255,255,0.15)",
     paddingHorizontal: 18,
     paddingVertical: 12,
   },
-  secondaryButtonLabel: {
+  secondaryButtonDarkLabel: {
     color: "#fff",
     fontWeight: "600",
   },
@@ -410,6 +695,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     borderColor: "#fff",
   },
+  taskChipActive: {
+    backgroundColor: studyPalette.accent,
+    borderColor: studyPalette.accent,
+  },
   presetChipLabel: {
     color: "rgba(255,255,255,0.7)",
     fontSize: 12,
@@ -417,6 +706,9 @@ const styles = StyleSheet.create({
   },
   presetChipLabelActive: {
     color: studyPalette.night,
+  },
+  taskChipLabelActive: {
+    color: "#fff",
   },
   statGrid: {
     flexDirection: "row",
@@ -585,5 +877,24 @@ const styles = StyleSheet.create({
     color: studyPalette.mutedInk,
     textTransform: "capitalize",
     fontSize: 12,
+  },
+  summaryWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 12,
+  },
+  summaryChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: studyPalette.border,
+    backgroundColor: "#fff",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  summaryChipText: {
+    color: studyPalette.mutedInk,
+    fontSize: 12,
+    fontWeight: "600",
   },
 });

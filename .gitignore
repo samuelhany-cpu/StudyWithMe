@@ -7,6 +7,7 @@ coverage
 
 apps/web/.next
 apps/web/out
+*.tsbuildinfo
 apps/mobile/.expo
 apps/mobile/dist
 apps/mobile/dist-web
