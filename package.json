@@ -1,0 +1,17 @@
+{
+  "name": "study-with-me",
+  "private": true,
+  "packageManager": "pnpm@10.19.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "dev:web": "pnpm --filter @studywithme/web dev",
+    "dev:mobile": "pnpm --filter @studywithme/mobile start",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.1.3",
+    "typescript": "^5.9.3"
+  }
+}
