@@ -82,20 +82,71 @@ export default function App() {
   const previousPhase = useRef(timerState.phase);
   const presenceChannelRef = useRef<RealtimeChannel | null>(null);
   const presenceIdentityRef = useRef({ name: "Visitor", avatar: "VI" });
+  const userIdRef = useRef<string | null>(null);
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
   useEffect(() => {
     void hydrateState();
     void requestNotificationPermission();
 
-    // Auth state listener: transition to app screen when session is established
+    // Auth state listener: transition to app screen and load real data on sign-in
     let authUnsubscribe: (() => void) | undefined;
     if (supabase) {
+      const loadFromDb = async (uid: string) => {
+        const [{ data: sessionsData }, { data: tasksData }] = await Promise.all([
+          supabase!
+            .from("focus_sessions")
+            .select("*")
+            .eq("user_id", uid)
+            .eq("status", "completed")
+            .order("started_at", { ascending: false })
+            .limit(50),
+          supabase!.from("study_tasks").select("*").eq("user_id", uid),
+        ]);
+        if (sessionsData) {
+          setRecentSessions(
+            sessionsData.map((row) => ({
+              id: row.id as string,
+              taskId: (row.task_id as string | null) ?? undefined,
+              subject: row.subject as string,
+              startedAt: row.started_at as string,
+              completedAt: (row.completed_at as string | null) ?? undefined,
+              focusMinutes: row.focus_minutes as number,
+              breakMinutes: row.break_minutes as number,
+              status: row.status as "active" | "paused" | "completed",
+            })),
+          );
+        }
+        if (tasksData) {
+          setTasks(
+            tasksData.map((row) => ({
+              id: row.id as string,
+              title: row.title as string,
+              subject: row.subject as string,
+              estimatedPomodoros: row.estimated_pomodoros as number,
+              completedPomodoros: row.completed_pomodoros as number,
+            })),
+          );
+        }
+      };
+
       supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) setAppScreen("app");
+        if (session) {
+          setAppScreen("app");
+          userIdRef.current = session.user.id;
+          void loadFromDb(session.user.id);
+        }
       });
+
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-        if (session) setAppScreen("app");
+        const prevId = userIdRef.current;
+        if (session) {
+          setAppScreen("app");
+          userIdRef.current = session.user.id;
+          if (session.user.id !== prevId) void loadFromDb(session.user.id);
+        } else {
+          userIdRef.current = null;
+        }
       });
       authUnsubscribe = () => subscription.unsubscribe();
     }
@@ -114,8 +165,8 @@ export default function App() {
         .on("presence", { event: "sync" }, () => {
           const state = channel.presenceState<{ name: string; avatar: string; status: string }>();
           const entries = Object.entries(state).flatMap(([key, values]) =>
-            values.map((value) => ({
-              id: key,
+            values.map((value, i) => ({
+              id: i === 0 ? key : `${key}-${i}`,
               name: value.name ?? "Studying",
               avatar: value.avatar ?? "??",
               status: (value.status as "studying" | "break" | "done") ?? "studying",
@@ -189,6 +240,36 @@ export default function App() {
       if (session) {
         setRecentSessions((current) => [session, ...current].slice(0, 14));
         setTasks((current) => applyCompletedSessionToTasks(current, session));
+        if (supabase && userIdRef.current) {
+          const uid = userIdRef.current;
+          const client = supabase;
+          void (async () => {
+            await client.from("focus_sessions").insert({
+              user_id: uid,
+              task_id: session.taskId ?? null,
+              subject: session.subject,
+              focus_minutes: session.focusMinutes,
+              break_minutes: session.breakMinutes,
+              status: "completed",
+              started_at: session.startedAt,
+              completed_at: session.completedAt,
+            });
+            if (session.taskId) {
+              const linked = tasks.find((t) => t.id === session.taskId);
+              if (linked) {
+                await client
+                  .from("study_tasks")
+                  .update({
+                    completed_pomodoros: Math.min(
+                      linked.completedPomodoros + 1,
+                      linked.estimatedPomodoros,
+                    ),
+                  })
+                  .eq("id", session.taskId);
+              }
+            }
+          })();
+        }
       }
 
       void sendLocalNotification("Session finished", "Your focus and break cycle are complete.");

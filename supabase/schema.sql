@@ -46,3 +46,36 @@ create table if not exists notification_preferences (
   daily_reminder_enabled boolean not null default false,
   updated_at timestamptz not null default now()
 );
+
+-- Row level security
+
+alter table profiles enable row level security;
+alter table study_tasks enable row level security;
+alter table focus_sessions enable row level security;
+alter table focus_rooms enable row level security;
+alter table notification_preferences enable row level security;
+
+create policy "users manage own profile" on profiles
+  using (auth.uid() = id) with check (auth.uid() = id);
+
+create policy "users read own tasks" on study_tasks
+  for select using (auth.uid() = user_id);
+create policy "users insert own tasks" on study_tasks
+  for insert with check (auth.uid() = user_id);
+create policy "users update own tasks" on study_tasks
+  for update using (auth.uid() = user_id);
+create policy "users delete own tasks" on study_tasks
+  for delete using (auth.uid() = user_id);
+
+create policy "users read own sessions" on focus_sessions
+  for select using (auth.uid() = user_id);
+create policy "users insert own sessions" on focus_sessions
+  for insert with check (auth.uid() = user_id);
+create policy "users update own sessions" on focus_sessions
+  for update using (auth.uid() = user_id);
+
+create policy "authenticated users read rooms" on focus_rooms
+  for select using (auth.role() = 'authenticated');
+
+create policy "users manage own notification prefs" on notification_preferences
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);

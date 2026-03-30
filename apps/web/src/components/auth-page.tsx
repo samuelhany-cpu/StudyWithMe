@@ -3,14 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { appCopy } from "@studywithme/design-tokens";
-import { createStudyWithMeBrowserClient, readSupabaseConfig } from "@studywithme/supabase";
-
-const config = readSupabaseConfig({
-  url: process.env.NEXT_PUBLIC_SUPABASE_URL,
-  anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-});
-
-const supabase = createStudyWithMeBrowserClient(config);
+import { supabase } from "@/lib/supabase";
 
 export function AuthPage() {
   const [email, setEmail] = useState("");

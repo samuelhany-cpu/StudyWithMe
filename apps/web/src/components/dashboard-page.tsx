@@ -29,19 +29,13 @@ import {
   weekLabels,
 } from "@studywithme/domain";
 import type { RealtimeChannel, User } from "@supabase/supabase-js";
-import { createStudyWithMeBrowserClient, getSupabaseStatusMessage, readSupabaseConfig } from "@studywithme/supabase";
+import { getSupabaseStatusMessage } from "@studywithme/supabase";
+import { supabase, supabaseConfig } from "@/lib/supabase";
 
 const timerStorageKey = "study-with-me:web:timer";
 const sessionsStorageKey = "study-with-me:web:sessions";
 const tasksStorageKey = "study-with-me:web:tasks";
 const mockSnapshot = createMockDashboardSnapshot();
-
-const supabaseState = readSupabaseConfig({
-  url: process.env.NEXT_PUBLIC_SUPABASE_URL,
-  anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-});
-
-const supabase = createStudyWithMeBrowserClient(supabaseState);
 
 export function DashboardPage() {
   const [tasks, setTasks] = useState(mockSnapshot.tasks);
@@ -54,6 +48,7 @@ export function DashboardPage() {
   const previousPhase = useRef(timerState.phase);
   const presenceChannelRef = useRef<RealtimeChannel | null>(null);
   const presenceIdentityRef = useRef({ name: "Visitor", avatar: "VI" });
+  const userIdRef = useRef<string | null>(null);
   const timezone = useMemo(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     [],
@@ -118,6 +113,36 @@ export function DashboardPage() {
       if (session) {
         setRecentSessions((current) => [session, ...current].slice(0, 14));
         setTasks((current) => applyCompletedSessionToTasks(current, session));
+        if (supabase && userIdRef.current) {
+          const uid = userIdRef.current;
+          const client = supabase;
+          void (async () => {
+            await client.from("focus_sessions").insert({
+              user_id: uid,
+              task_id: session.taskId ?? null,
+              subject: session.subject,
+              focus_minutes: session.focusMinutes,
+              break_minutes: session.breakMinutes,
+              status: "completed",
+              started_at: session.startedAt,
+              completed_at: session.completedAt,
+            });
+            if (session.taskId) {
+              const linked = tasks.find((t) => t.id === session.taskId);
+              if (linked) {
+                await client
+                  .from("study_tasks")
+                  .update({
+                    completed_pomodoros: Math.min(
+                      linked.completedPomodoros + 1,
+                      linked.estimatedPomodoros,
+                    ),
+                  })
+                  .eq("id", session.taskId);
+              }
+            }
+          })();
+        }
       }
 
       void notify("Session finished", "Your focus and break cycle are complete.");
@@ -129,12 +154,59 @@ export function DashboardPage() {
   useEffect(() => {
     if (!supabase) return;
 
+    const loadFromDb = async (uid: string) => {
+      const [{ data: sessionsData }, { data: tasksData }] = await Promise.all([
+        supabase!
+          .from("focus_sessions")
+          .select("*")
+          .eq("user_id", uid)
+          .eq("status", "completed")
+          .order("started_at", { ascending: false })
+          .limit(50),
+        supabase!.from("study_tasks").select("*").eq("user_id", uid),
+      ]);
+      if (sessionsData) {
+        setRecentSessions(
+          sessionsData.map((row) => ({
+            id: row.id as string,
+            taskId: (row.task_id as string | null) ?? undefined,
+            subject: row.subject as string,
+            startedAt: row.started_at as string,
+            completedAt: (row.completed_at as string | null) ?? undefined,
+            focusMinutes: row.focus_minutes as number,
+            breakMinutes: row.break_minutes as number,
+            status: row.status as "active" | "paused" | "completed",
+          })),
+        );
+      }
+      if (tasksData) {
+        setTasks(
+          tasksData.map((row) => ({
+            id: row.id as string,
+            title: row.title as string,
+            subject: row.subject as string,
+            estimatedPomodoros: row.estimated_pomodoros as number,
+            completedPomodoros: row.completed_pomodoros as number,
+          })),
+        );
+      }
+    };
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
+      userIdRef.current = session?.user?.id ?? null;
+      if (session?.user?.id) void loadFromDb(session.user.id);
     });
 
     const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => { setUser(session?.user ?? null); },
+      (_event, session) => {
+        const prevId = userIdRef.current;
+        setUser(session?.user ?? null);
+        userIdRef.current = session?.user?.id ?? null;
+        if (session?.user?.id && session.user.id !== prevId) {
+          void loadFromDb(session.user.id);
+        }
+      },
     );
 
     let pid = window.sessionStorage.getItem("swm:pid");
@@ -150,8 +222,8 @@ export function DashboardPage() {
       .on("presence", { event: "sync" }, () => {
         const state = channel.presenceState<{ name: string; avatar: string; status: string }>();
         const entries = Object.entries(state).flatMap(([key, values]) =>
-          values.map((value) => ({
-            id: key,
+          values.map((value, i) => ({
+            id: i === 0 ? key : `${key}-${i}`,
             name: value.name ?? "Studying",
             avatar: value.avatar ?? "??",
             status: (value.status as "studying" | "break" | "done") ?? "studying",
@@ -267,7 +339,7 @@ export function DashboardPage() {
                   Enable notifications
                 </button>
                 <div className="rounded-full border border-[color:var(--border)] bg-white/75 px-4 py-2 text-sm text-[color:var(--muted-ink)]">
-                  {getSupabaseStatusMessage(supabaseState.configured)}
+                  {getSupabaseStatusMessage(supabaseConfig.configured)}
                 </div>
               </div>
               <p className="text-sm text-[color:var(--muted-ink)]">{notificationState}</p>

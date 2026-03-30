@@ -2,14 +2,7 @@
 
 import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { createStudyWithMeBrowserClient, readSupabaseConfig } from "@studywithme/supabase";
-
-const config = readSupabaseConfig({
-  url: process.env.NEXT_PUBLIC_SUPABASE_URL,
-  anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-});
-
-const supabase = createStudyWithMeBrowserClient(config);
+import { supabase } from "@/lib/supabase";
 
 function CallbackHandler() {
   const router = useRouter();
