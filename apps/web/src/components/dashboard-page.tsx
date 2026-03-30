@@ -28,7 +28,8 @@ import {
   updateTimerPreset,
   weekLabels,
 } from "@studywithme/domain";
-import { getSupabaseStatusMessage, readSupabaseConfig } from "@studywithme/supabase";
+import type { RealtimeChannel, User } from "@supabase/supabase-js";
+import { createStudyWithMeBrowserClient, getSupabaseStatusMessage, readSupabaseConfig } from "@studywithme/supabase";
 
 const timerStorageKey = "study-with-me:web:timer";
 const sessionsStorageKey = "study-with-me:web:sessions";
@@ -40,12 +41,19 @@ const supabaseState = readSupabaseConfig({
   anonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
 });
 
+const supabase = createStudyWithMeBrowserClient(supabaseState);
+
 export function DashboardPage() {
   const [tasks, setTasks] = useState(mockSnapshot.tasks);
   const [recentSessions, setRecentSessions] = useState(mockSnapshot.recentSessions);
   const [timerState, setTimerState] = useState(() => createTimerRuntime(mockSnapshot.activePreset));
   const [notificationState, setNotificationState] = useState("Notifications are optional, but useful for full focus sessions.");
+  const [user, setUser] = useState<User | null>(null);
+  const [liveUsers, setLiveUsers] = useState(mockSnapshot.liveUsers);
+  const [presenceUsers, setPresenceUsers] = useState(mockSnapshot.presence);
   const previousPhase = useRef(timerState.phase);
+  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
+  const presenceIdentityRef = useRef({ name: "Visitor", avatar: "VI" });
   const timezone = useMemo(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     [],
@@ -118,6 +126,73 @@ export function DashboardPage() {
     previousPhase.current = timerState.phase;
   }, [tasks, timerState]);
 
+  useEffect(() => {
+    if (!supabase) return;
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    const { data: { subscription: authSubscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => { setUser(session?.user ?? null); },
+    );
+
+    let pid = window.sessionStorage.getItem("swm:pid");
+    if (!pid) {
+      pid = Math.random().toString(36).slice(2);
+      window.sessionStorage.setItem("swm:pid", pid);
+    }
+
+    const channel = supabase.channel("swm:global-presence");
+    presenceChannelRef.current = channel;
+
+    channel
+      .on("presence", { event: "sync" }, () => {
+        const state = channel.presenceState<{ name: string; avatar: string; status: string }>();
+        const entries = Object.entries(state).flatMap(([key, values]) =>
+          values.map((value) => ({
+            id: key,
+            name: value.name ?? "Studying",
+            avatar: value.avatar ?? "??",
+            status: (value.status as "studying" | "break" | "done") ?? "studying",
+          })),
+        );
+        setLiveUsers(entries.length);
+        setPresenceUsers(entries.slice(0, 4));
+      })
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") {
+          const { data: { user: currentUser } } = await supabase!.auth.getUser();
+          const name =
+            (currentUser?.user_metadata?.full_name as string | undefined) ??
+            currentUser?.email?.split("@")[0] ??
+            "Visitor";
+          const avatar = name.slice(0, 2).toUpperCase();
+          presenceIdentityRef.current = { name, avatar };
+          await channel.track({ name, avatar, status: "studying" });
+        }
+      });
+
+    return () => {
+      authSubscription.unsubscribe();
+      void channel.unsubscribe();
+      presenceChannelRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!presenceChannelRef.current) return;
+    const phaseToStatus = {
+      focus: "studying",
+      break: "break",
+      paused: "studying",
+      completed: "done",
+      idle: "studying",
+    } as const;
+    const { name, avatar } = presenceIdentityRef.current;
+    void presenceChannelRef.current.track({ name, avatar, status: phaseToStatus[timerState.phase] });
+  }, [timerState.phase]);
+
   const streaks = calculateStreaks(recentSessions, timezone);
   const weeklyFocusMinutes = calculateWeeklyFocusMinutes(recentSessions, timezone);
   const weeklyAverage = getWeeklyAverage(weeklyFocusMinutes);
@@ -150,12 +225,27 @@ export function DashboardPage() {
                 <div className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.24em] text-[color:var(--muted-ink)]">
                   Live Dashboard
                 </div>
-                <Link
-                  href="/sign-in"
-                  className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.24em] text-[color:var(--muted-ink)]"
-                >
-                  Sign in
-                </Link>
+                {user ? (
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-white/70 px-3 py-1 text-xs text-[color:var(--muted-ink)]">
+                      {user.email}
+                    </span>
+                    <button
+                      type="button"
+                      className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.24em] text-[color:var(--muted-ink)]"
+                      onClick={() => void supabase?.auth.signOut()}
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                ) : (
+                  <Link
+                    href="/sign-in"
+                    className="inline-flex items-center rounded-full border border-[color:var(--border)] bg-white/70 px-3 py-1 text-xs uppercase tracking-[0.24em] text-[color:var(--muted-ink)]"
+                  >
+                    Sign in
+                  </Link>
+                )}
               </div>
               <div className="space-y-3">
                 <h1 className="max-w-2xl text-4xl font-semibold leading-tight sm:text-5xl">
@@ -167,7 +257,7 @@ export function DashboardPage() {
               </div>
               <div className="flex flex-wrap gap-3">
                 <div className="rounded-full bg-[color:var(--accent)] px-4 py-2 text-sm font-semibold text-white">
-                  {mockSnapshot.liveUsers} people studying live
+                  {liveUsers} people studying live
                 </div>
                 <button
                   type="button"
@@ -182,7 +272,7 @@ export function DashboardPage() {
               </div>
               <p className="text-sm text-[color:var(--muted-ink)]">{notificationState}</p>
               <div className="flex flex-wrap gap-2">
-                {mockSnapshot.presence.map((user) => (
+                {presenceUsers.map((user) => (
                   <div
                     key={user.id}
                     className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border)] bg-white/80 px-3 py-2 text-sm"

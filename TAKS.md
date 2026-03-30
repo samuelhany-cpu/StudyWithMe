@@ -13,7 +13,7 @@
 ## 3. Supabase Schema And Auth
 - [x] Define `profiles`, `focus_sessions`, `study_tasks`, `focus_rooms`, and notification preferences
 - [x] Configure Supabase clients for web and mobile
-- [ ] Implement auth flows on both clients for email magic link and Google
+- [x] Implement auth flows on both clients for email magic link and Google
 
 ## 4. Web App Shell And Routing
 - [x] Replace starter page with branded Study With Me dashboard shell
@@ -36,9 +36,9 @@
 - [x] Surface recent sessions and subject tags
 
 ## 8. Realtime Global Presence
-- [ ] Subscribe to global presence channel
+- [x] Subscribe to global presence channel
 - [x] Show active user count and avatar strip
-- [ ] Expire stale presence safely on disconnect
+- [x] Expire stale presence safely on disconnect
 
 ## 9. Ambient Rooms With Synced Timers
 - [x] Define room cards and room metadata
@@ -53,7 +53,7 @@
 ## 11. Notifications On Web And Mobile
 - [x] Add browser notifications for timer events
 - [x] Add Expo notifications for timer events and reminders
-- [ ] Verify deep-link or resume behavior after notification taps
+- [x] Verify deep-link or resume behavior after notification taps
 
 ## 12. QA, Polish, Deploy
 - [x] Ship responsive web dashboard and polished mobile home

@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { startTransition, useEffect, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import * as Device from "expo-device";
@@ -76,12 +77,75 @@ export default function App() {
   const [tasks, setTasks] = useState(snapshot.tasks);
   const [recentSessions, setRecentSessions] = useState(snapshot.recentSessions);
   const [timerState, setTimerState] = useState(() => createTimerRuntime(snapshot.activePreset));
+  const [liveUsers, setLiveUsers] = useState(snapshot.liveUsers);
+  const [presenceUsers, setPresenceUsers] = useState(snapshot.presence);
   const previousPhase = useRef(timerState.phase);
+  const presenceChannelRef = useRef<RealtimeChannel | null>(null);
+  const presenceIdentityRef = useRef({ name: "Visitor", avatar: "VI" });
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
   useEffect(() => {
     void hydrateState();
     void requestNotificationPermission();
+
+    // Auth state listener: transition to app screen when session is established
+    let authUnsubscribe: (() => void) | undefined;
+    if (supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session) setAppScreen("app");
+      });
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session) setAppScreen("app");
+      });
+      authUnsubscribe = () => subscription.unsubscribe();
+    }
+
+    // Notification response handler: bring user back to Dashboard tab on tap
+    const notifSubscription = Notifications.addNotificationResponseReceivedListener(() => {
+      setActiveTab("Dashboard");
+    });
+
+    // Realtime presence
+    if (supabase) {
+      const channel = supabase.channel("swm:global-presence");
+      presenceChannelRef.current = channel;
+
+      channel
+        .on("presence", { event: "sync" }, () => {
+          const state = channel.presenceState<{ name: string; avatar: string; status: string }>();
+          const entries = Object.entries(state).flatMap(([key, values]) =>
+            values.map((value) => ({
+              id: key,
+              name: value.name ?? "Studying",
+              avatar: value.avatar ?? "??",
+              status: (value.status as "studying" | "break" | "done") ?? "studying",
+            })),
+          );
+          setLiveUsers(entries.length);
+          setPresenceUsers(entries.slice(0, 4));
+        })
+        .subscribe(async (status) => {
+          if (status === "SUBSCRIBED") {
+            const { data: { user } } = await supabase!.auth.getUser();
+            const name =
+              (user?.user_metadata?.full_name as string | undefined) ??
+              user?.email?.split("@")[0] ??
+              "Visitor";
+            const avatar = name.slice(0, 2).toUpperCase();
+            presenceIdentityRef.current = { name, avatar };
+            await channel.track({ name, avatar, status: "studying" });
+          }
+        });
+    }
+
+    return () => {
+      authUnsubscribe?.();
+      notifSubscription.remove();
+      if (presenceChannelRef.current) {
+        void presenceChannelRef.current.unsubscribe();
+        presenceChannelRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -132,6 +196,19 @@ export default function App() {
 
     previousPhase.current = timerState.phase;
   }, [tasks, timerState]);
+
+  useEffect(() => {
+    if (!presenceChannelRef.current) return;
+    const phaseToStatus = {
+      focus: "studying",
+      break: "break",
+      paused: "studying",
+      completed: "done",
+      idle: "studying",
+    } as const;
+    const { name, avatar } = presenceIdentityRef.current;
+    void presenceChannelRef.current.track({ name, avatar, status: phaseToStatus[timerState.phase] });
+  }, [timerState.phase]);
 
   const streaks = calculateStreaks(recentSessions, timezone);
   const weeklyFocusMinutes = calculateWeeklyFocusMinutes(recentSessions, timezone);
@@ -236,7 +313,7 @@ export default function App() {
           <Text style={styles.heroTitle}>{appCopy.name}</Text>
           <Text style={styles.heroCopy}>{appCopy.summary}</Text>
           <View style={styles.liveBadge}>
-            <Text style={styles.liveBadgeText}>{snapshot.liveUsers} studying live</Text>
+            <Text style={styles.liveBadgeText}>{liveUsers} studying live</Text>
           </View>
           <Text style={styles.statusText}>{getSupabaseStatusMessage(supabaseState.configured)}</Text>
           <Text style={styles.statusText}>{notificationStatus}</Text>
@@ -444,7 +521,7 @@ export default function App() {
           <Text style={styles.sectionEyebrow}>Live presence</Text>
           <Text style={styles.sectionTitle}>People focusing now</Text>
           <View style={styles.presenceWrap}>
-            {snapshot.presence.map((user) => (
+            {presenceUsers.map((user) => (
               <View key={user.id} style={styles.presencePill}>
                 <View style={styles.avatar}>
                   <Text style={styles.avatarText}>{user.avatar}</Text>
